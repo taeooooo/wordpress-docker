@@ -1,0 +1,143 @@
+version: "3"
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: db
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - MYSQL_DATABASE=wordpress
+    volumes:
+      - dbdata:/var/lib/mysql
+    command: '--default-authentication-plugin=mysql_native_password'
+    networks:
+      - app-network
+
+  wordpress:
+    depends_on:
+      - db
+    image: wordpress:6.0.2-fpm-alpine
+    container_name: wordpress
+    restart: unless-stopped
+    env_file: .env
+    user: "82"
+    environment:
+      - WORDPRESS_DB_HOST=db:3306
+      - WORDPRESS_DB_USER=$MYSQL_USER
+      - WORDPRESS_DB_PASSWORD=$MYSQL_PASSWORD
+      - WORDPRESS_DB_NAME=wordpress
+    volumes:
+      - ./wordpress/wp-content/themes:/var/www/html/wp-content/themes
+      - ./wordpress/wp-content/plugins:/var/www/html/wp-content/plugins
+      - ./wordpress/wp-content/uploads:/var/www/html/wp-content/uploads
+      - wordpress:/var/www/html
+    networks:
+      - app-network
+
+  webserver:
+    depends_on:
+      - wordpress
+    image: nginx:1.15.12-alpine
+    container_name: webserver
+    restart: unless-stopped
+    environment:
+      - PORT=8080
+    expose:
+      - "8080"
+    volumes:
+      - wordpress:/var/www/html
+      - ./webserver/nginx-conf:/etc/nginx/conf.d
+    networks:
+      - app-network
+
+  nginx-waf:
+    container_name: nginx-waf
+    depends_on:
+      - webserver
+    image: owasp/modsecurity-crs:nginx
+    ports:
+      - "80:80"
+      - "443:443"
+
+    networks:
+      - app-network
+
+    environment:
+      - SERVERNAME=localhost
+      - PROXY_SSL=on
+      - BACKEND=http://webserver:8080
+
+      #############################################
+      # CRS Variables
+      #############################################
+      # Paranoia Level
+      - PARANOIA=1
+      # Replaces PARANOIA as of CRS 4
+      - BLOCKING_PARANOIA=1
+      # Inbound and Outbound Anomaly Score Threshold
+      - ANOMALY_INBOUND=5
+      - ANOMALY_OUTBOUND=4
+      # Executing Paranoia Level
+      # - EXECUTING_PARANOIA=2
+      #
+      # Replaces EXECUTING_PARANOIA as of CRS 4
+      # - DETECTION_PARANOIA=2
+      #
+      # New in CRS 4
+      - REPORTING_LEVEL=2
+
+
+      #######################################################
+      # Reverse Proxy mode
+      # (only available if SETPROXY was enabled during the
+      # parent ModSecurity image)
+      #######################################################
+      #PROXYLOCATION: Application Backend of Reverse Proxy
+      #- PROXYLOCATION=http://www.naver.com
+      #
+      # If needed: add own httpd-proxy.conf (only available if SETPROXY
+      # was enabled during build of parent ModSecurity image)
+      #  - ./httpd-proxy.conf:/usr/local/apache2/conf/extra/httpd-proxy.conf
+
+      #######################################################
+      # Various CRS Variables with Default Values
+      #######################################################
+      #- ENFORCE_BODYPROC_URLENCODED=1
+      #- ALLOWED_METHODS=GET HEAD POST OPTIONS
+      #- ALLOWED_REQUEST_CONTENT_TYPE=application/x-www-form-urlencoded|multipart/form-data|text/xml|application/xml|application/soap+xml|application/x-amf|application/json|application/octet-stream|text/plain
+      #- ALLOWED_REQUEST_CONTENT_TYPE_CHARSET=utf-8|iso-8859-1|iso-8859-15|windows-1252
+      #- ALLOWED_HTTP_VERSIONS=HTTP/1.0 HTTP/1.1 HTTP/2 HTTP/2.0
+      #- RESTRICTED_EXTENSIONS=.asa/ .asax/ .ascx/ .axd/ .backup/ .bak/ .bat/ .cdx/ .cer/ .cfg/ .cmd/ .com/ .config/ .conf/ .cs/ .csproj/ .csr/ .dat/ .db/ .dbf/ .dll/ .dos/ .htr/ .htw/ .ida/ .idc/ .idq/ .inc/ .ini/ .key/ .licx/ .lnk/ .log/ .mdb/ .old/ .pass/ .pdb/ .pol/ .printer/ .pwd/ .resources/ .resx/ .sql/ .sys/ .vb/ .vbs/ .vbproj/ .vsdisco/ .webinfo/ .xsd/ .xsx/
+      #- RESTRICTED_HEADERS=/proxy/ /lock-token/ /content-range/ /if/
+      #- STATIC_EXTENSIONS=/.jpg/ /.jpeg/ /.png/ /.gif/ /.js/ /.css/ /.ico/ /.svg/ /.webp/
+
+      #######################################################
+      # CRS Variables with Default Value unlimited
+      #######################################################
+      #- MAX_NUM_ARGS=255
+      #- ARG_NAME_LENGTH=100
+      #- ARG_LENGTH=400
+      #- TOTAL_ARG_LENGTH=64000
+      #- MAX_FILE_SIZE=1048576
+      #- COMBINED_FILE_SIZES=1048576
+
+    volumes:
+      - wordpress:/usr/share/nginx/html
+      - ./nginx-waf/nginx/templates/proxy_backend.conf.template:/etc/nginx/templates/includes/proxy_backend.conf.template
+      - ./nginx-waf/nginx/templates/default.conf.template:/etc/nginx/templates/conf.d/default.conf.template
+      - ./nginx-waf/nginx/includes/wp.conf:/etc/nginx/includes/wp.conf
+      - ./nginx-waf/nginx/includes/secure.conf:/etc/nginx/includes/secure.conf
+      - ./nginx-waf/nginx/templates/modsecurity.d/setup.conf.template:/etc/nginx/templates/modsecurity.d/setup.conf.template
+      - ./nginx-waf/rules/REQUEST-903.9002-WORDPRESS-EXCLUSION-RULES.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-903.9002-WORDPRESS-EXCLUSION-RULES.conf
+      - ./nginx-waf/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf
+      - ./nginx-waf/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf
+
+
+volumes:
+  wordpress:
+  dbdata:
+
+networks:
+  app-network:
+    driver: bridge
